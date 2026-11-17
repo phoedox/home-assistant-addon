@@ -1,0 +1,47 @@
+name: update
+# Follows Phoedox releases: copies deploy/homeassistant/phoedox of the newest
+# release, sets the add-on version to the release version and pins the image.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Newest Phoedox release
+        id: rel
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          tag=$(gh api repos/phoedox/phoedox/releases/latest --jq .tag_name 2>/dev/null || true)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+      - name: Copy the add-on files of that release
+        if: steps.rel.outputs.tag != ''
+        id: copy
+        run: |
+          v="${{ steps.rel.outputs.version }}"
+          current=$(sed -n 's/^version: "\(.*\)"/\1/p' phoedox/config.yaml)
+          if [ "$current" = "$v" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          tmp=$(mktemp -d)
+          curl -fsSL "https://github.com/phoedox/phoedox/archive/refs/tags/${{ steps.rel.outputs.tag }}.tar.gz" | tar -xz -C "$tmp"
+          src=$(echo "$tmp"/*/deploy/homeassistant/phoedox)
+          for f in "$src"/*; do
+            case "$(basename "$f")" in icon.png|logo.png|CHANGELOG.md) ;; *) cp -r "$f" phoedox/ ;; esac
+          done
+          sed -i "s/^version: .*/version: \"$v\"/" phoedox/config.yaml
+          sed -i "s#PHOEDOX_IMAGE: .*#PHOEDOX_IMAGE: ghcr.io/phoedox/phoedox:$v#" phoedox/build.yaml
+          { echo "# Changelog"; echo; echo "## $v"; echo; echo "- Phoedox $v: https://github.com/phoedox/phoedox/releases/tag/${{ steps.rel.outputs.tag }}"; echo; tail -n +3 phoedox/CHANGELOG.md; } > "$tmp/CHANGELOG.md"
+          mv "$tmp/CHANGELOG.md" phoedox/CHANGELOG.md
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: Commit
+        if: steps.copy.outputs.changed == 'true'
+        run: |
+          git config user.name "phoedox-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A phoedox
+          git commit -m "chore: Phoedox ${{ steps.rel.outputs.version }}"
+          git push
